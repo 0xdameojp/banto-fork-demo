@@ -1045,7 +1045,11 @@ export const defaultTheme: Theme = {
         <div>
           <p>{t("passkey.add_ready")}</p>
           <PasskeyButton ctx={ctx} kind="register" returnTo={returnTo} />
-          <p class="muted">{returnTo ? <a href={returnTo}>{t("passkey.add_back")}</a> : null}</p>
+          {/* やめる: この端末に作った追加のためだけのログインを取り消してから、元のサイトへ戻す（0070） */}
+          <form method="post" action={`${ctx.shopPath}/account/logout`} class="muted">
+            <input type="hidden" name="return_to" value={returnTo ?? ""} />
+            <button type="submit">{t("passkey.add_cancel")}</button>
+          </form>
         </div>
       );
     } else if (mode === "passkey") {
@@ -1548,7 +1552,7 @@ export const defaultTheme: Theme = {
     } else if (step === "sent") {
       body = (
         <div>
-          <p class="notice">{tf("inq.sent", { number: sent?.number ?? "" })}</p>
+          <p class="notice">{sent?.number != null ? tf("inq.sent", { number: sent.number }) : t("inq.sent_nonumber")}</p>
           <p>{sent?.verified ? t("inq.sent_verified") : t("inq.sent_verify")}</p>
           {sent && !sent.mailSent ? (
             <>

@@ -35,7 +35,28 @@ async function hmacHex(secret: string, purpose: string, value: string): Promise<
 /** コード・トークン・IP の HMAC（用途ごとに鍵を分ける） */
 export const codeHash = (secret: string, code: string) => hmacHex(secret, "code", code);
 export const linkHash = (secret: string, token: string) => hmacHex(secret, "link", token);
-export const ipHash = (secret: string, ip: string) => hmacHex(secret, "ip", ip);
+export const ipHash = (secret: string, ip: string) => hmacHex(secret, "ip", ipBucket(ip));
+
+/**
+ * 回数の制限で「同じ IP」とみなす単位。IPv4 はそのまま、IPv6 は上位 64 ビット（/64）に丸める
+ * （1 台の端末が 1 つの /64 の中で IP をいくらでも変えられるので、そのままでは IP ごとの上限が効かない）。
+ * IPv4 射影（::ffff:1.2.3.4）は中の IPv4。形が読めなければそのまま返す
+ */
+export function ipBucket(ip: string): string {
+  const s = ip.trim().toLowerCase();
+  if (!s.includes(":")) return s;
+  const v4 = /^(?:0*:)*:?ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
+  if (v4) return v4[1]!;
+  const halves = s.split("::");
+  if (halves.length > 2) return s;
+  const head = halves[0] === "" ? [] : halves[0]!.split(":");
+  const tail = halves.length === 2 && halves[1] !== "" ? halves[1]!.split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return s;
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return s;
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
 /** 在庫予約・試着の「同じ人」（会員 ID かメールアドレス）の HMAC（0029） */
 export const subjectHash = (secret: string, who: string) => hmacHex(secret, "subject", who);
 /** パスキーの challenge の HMAC（0046。DB には生の値を置かない） */
@@ -43,6 +64,8 @@ export const passkeyChallengeHash = (secret: string, challenge: string) => hmacH
 /** お問い合わせのチケットを開くリンクのトークンと、試行の回数を数えるメールアドレスの HMAC（0061。DB には生の値を置かない） */
 export const inquiryLinkHash = (secret: string, token: string) => hmacHex(secret, "inquiry-link", token);
 export const inquiryEmailHash = (secret: string, email: string) => hmacHex(secret, "inquiry-email", email.trim().toLowerCase());
+/** 注文照会の外れをアドレスごとに数えるための HMAC（0089、order_lookup の p_email_hash。小文字にしてから） */
+export const orderEmailHash = (secret: string, email: string) => hmacHex(secret, "order-email", email.trim().toLowerCase());
 /** この端末でこの会員がログインしたことがある印（知らせのメールを送るかの判定、src/members/notice.ts） */
 export const deviceMark = (secret: string, shopId: string, customerId: string) => hmacHex(secret, "device", `${shopId}|${customerId}`);
 
@@ -83,12 +106,21 @@ export interface MemberSession {
   chk?: number;
   /** ログインした時刻（UNIX 秒）。画面の出し分けだけに使う（パスキーの追加が今できるか。判定は DB） */
   iat?: number;
+  /**
+   * ヘッドレスのパスキーの追加（0070）のためだけに作ったセッションの印。会員ページ・パスワードの変更などには使えず、
+   * パスキーの登録とログアウトだけに通す（券を使っただけで登録をやめた端末に、長いログインを残さない）
+   */
+  add?: true;
 }
 
 /** Cookie の期限（開くたびに延ばす） */
 export const SESSION_SECONDS = 60 * 60 * 24 * 30;
 /** セッションの行の絶対の期限。延ばさない。過ぎたらログインし直す */
 export const SESSION_ABSOLUTE_SECONDS = 60 * 60 * 24 * 90;
+/** パスキーの追加のためだけのセッション（0070、`add`）の期限。延ばさない。登録が済めば取り消す */
+export const PASSKEY_ADD_SESSION_SECONDS = 20 * 60;
+/** パスキーの追加のためだけのセッションの行の目印（label の先頭。端末の一覧で見分けられるように） */
+export const PASSKEY_ADD_LABEL = "passkey-add";
 /** Cookie のセッションを DB で確かめ直す間隔。取り消しが効くまで最大この秒数かかる（毎回は問い合わせない。速度の予算） */
 export const SESSION_CHECK_SECONDS = 5 * 60;
 
@@ -109,6 +141,7 @@ export async function openSession(secret: string, shopId: string, raw: string | 
     ...(typeof v.sid === "string" ? { sid: v.sid } : {}),
     ...(typeof v.chk === "number" ? { chk: v.chk } : {}),
     ...(typeof v.iat === "number" ? { iat: v.iat } : {}),
+    ...(v.add === true ? { add: true as const } : {}),
   };
 }
 

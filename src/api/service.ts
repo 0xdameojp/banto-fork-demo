@@ -18,6 +18,7 @@ import { inquiryLinkHash } from "../members/auth";
 import { randomToken } from "../util/signed";
 import { returnOrigins, safeReturnUrl, withQueryParam } from "../commerce/checkout";
 import { shopHome } from "../storefront/urls";
+import { SECURITY_HARDENING_4_MIGRATION } from "../storefront/data";
 import { sendAssignNotice, sendReplyNotice } from "../modules/inquiries";
 import type { InquiryMailShop } from "../modules/inquiries/mail";
 import { deleteThemeFiles, missingThemeAsset, prepareThemeVersion, putThemeAsset, readThemeBundle, removeThemeBundle, sealThemeAssets, storeThemeBundle, themeStorage, unsealThemeAssets } from "../themes/liquid/versions";
@@ -245,6 +246,8 @@ export class ApiService {
       throw new ApiError("invalid", e instanceof ImageFetchError ? e.message : "image_url must be an absolute http(s) URL", 400);
     }
     const optionsArg = this.imageOptionsArg(options);
+    // 外に取りに行く前・置き場に書く前に、書き込みのスコープを確かめる（imageUpload と同じ）
+    if (!(await this.call<boolean>("api_has_scope", { p_scope: "products:write" }))) throw new ApiError("unauthorized", "invalid, expired or insufficiently scoped token", 401);
     // 所有確認を先に（取得前に他ショップの product_id を弾く）
     await this.productGet({ id: productId });
     let image: Awaited<ReturnType<typeof fetchImage>>;
@@ -286,9 +289,11 @@ export class ApiService {
     if (info.status === "cancelled" || info.status === "refunded") return this.orderGet(id);
     if (info.status !== "paid") throw new ApiError("invalid", `order is ${info.status} and cannot be cancelled`, 400);
     const shop = await this.call<{ shop_id: string; stripe_account_id?: string | null }>("api_token_shop", {});
+    // 0090: 決済した口座で返金する（列は 0090 から）
+    const payment_account = (await this.migratedTo(SECURITY_HARDENING_4_MIGRATION)) ? await this.db.orderPaymentAccount(id, shop.shop_id) : null;
     let refunded = false;
     try {
-      refunded = await refundPayment(info, { config: this.config, fetch: this.fetchImpl, stripeAccountId: shop.stripe_account_id ?? null, idempotencyKey: `cancel-${id}` });
+      refunded = await refundPayment({ ...info, payment_account }, { config: this.config, fetch: this.fetchImpl, stripeAccountId: shop.stripe_account_id ?? null, idempotencyKey: `cancel-${id}` });
     } catch (e) {
       throw new ApiError("upstream", `refund failed: ${e instanceof CancelError || e instanceof Error ? e.message : String(e)}`, 502);
     }
@@ -432,7 +437,7 @@ export class ApiService {
   };
   /** 担当者にできる人（そのショップの「お問い合わせ」の項目を持つ運営側の人。user_id と運営者のメールアドレス） */
   inquiryAssignees = async () => {
-    return this.call<{ user_id: string; email: string }[]>("api_inquiry_assignees", {});
+    return this.call<{ user_id: string; label: string }[]>("api_inquiry_assignees", {});
   };
   /** 担当者を決める・外す（userId = null で外す）。担当になった人にはリンクだけのメール（宛先は AI に返さない） */
   inquiryAssign = async (number: number, userId: string | null): Promise<Record<string, unknown>> => {

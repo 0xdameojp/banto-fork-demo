@@ -21,9 +21,11 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../../app";
 import { PREFECTURES, isPrefecture } from "../../commerce/shipping";
-import type { PrivilegedDb } from "../../db/privileged";
+import { PrivilegedRpcError, type PrivilegedDb } from "../../db/privileged";
 import { t, tf, type MessageKey } from "../../i18n";
 import {
+  PASSKEY_ADD_LABEL,
+  PASSKEY_ADD_SESSION_SECONDS,
   SESSION_ABSOLUTE_SECONDS,
   SESSION_CHECK_SECONDS,
   SESSION_SECONDS,
@@ -44,14 +46,14 @@ import { OAuthError, PROVIDERS, authorizeUrl, callbackPath, isProvider, pkce, pr
 import { openSecret } from "../../members/secret-box";
 import { ipHash, linkHash } from "../../members/auth";
 import { privilegedFor } from "../payment-deps";
-import { afterResponse, clientIpFor, csrfGuard, formFields, isSecureRequest, publicBaseUrl, yen, type Ctx } from "../common";
-import { DEVICE_SECONDS, deviceCookieName, knownDevice, sendAccountChangeNotice, sendPasswordLoginNotice } from "../../members/notice";
+import { afterResponse, clientIpFor, csrfGuard, formFields, isSecureRequest, navigateOnly, publicBaseUrl, yen, type Ctx } from "../common";
+import { DEVICE_SECONDS, deviceCookieName, knownDevice, sendAccountChangeNotice, sendPasswordLoginNotice, sendWithdrawNotice } from "../../members/notice";
 import { createMailer } from "../../mail/send";
 import { memberAccountUrl, shopHome, shopOrigin } from "../../storefront/urls";
 import { domainUrlFor, onShopDomain, storefrontData } from "./domain";
 import type { AccountPageProps, AddressFormValues } from "../../themes/types";
 import { liquidThemeFor, renderAccount } from "./liquid";
-import type { PublicShop } from "../../storefront/data";
+import { SECURITY_HARDENING_4_MIGRATION, type PublicShop } from "../../storefront/data";
 import type { Theme } from "../../themes";
 import { MEMBER_CANCELLABLE, TRYON_MODULE, dateLabel } from "../../modules/store-tryon";
 import { RECEIPT_MODULE, RECEIPT_STATUSES, receiptSettings, renderReceipt, type ReceiptOrder } from "../../modules/receipt/render";
@@ -116,9 +118,15 @@ export function customerSession(c: Ctx, s: { shop: { id: string; slug: string; d
   if (!secret || (s.shop.settings ?? {})["members_enabled"] !== true) return Promise.resolve(null);
   const hit = verifiedSessions.get(c.req.raw);
   if (hit) return hit;
-  const p = verifySession(c, s.shop, secret);
+  // パスキーの追加のためだけのセッション（0070）は、登録とログアウト以外では会員として扱わない
+  const p = verifySession(c, s.shop, secret).then((v) => (v?.add && !passkeyAddPath(c) ? null : v));
   verifiedSessions.set(c.req.raw, p);
   return p;
+}
+
+/** `add` のセッションで通してよい場所: パスキーの登録（options・register）とログアウトだけ */
+function passkeyAddPath(c: Ctx): boolean {
+  return /\/account\/(?:passkey\/register(?:\/options)?|logout)$/.test(new URL(c.req.url).pathname);
 }
 
 async function verifySession(c: Ctx, shop: { id: string; slug: string; domain?: string | null }, secret: string): Promise<MemberSession | null> {
@@ -141,7 +149,8 @@ async function verifySession(c: Ctx, shop: { id: string; slug: string; domain?: 
     await writeSession(c, target, null);
     return null;
   }
-  const next = { ...v, chk: now, exp: now + SESSION_SECONDS };
+  // 追加のためだけのセッションの期限は延ばさない
+  const next = { ...v, chk: now, exp: v.add ? v.exp : now + SESSION_SECONDS };
   await writeSession(c, target, next);
   return next;
 }
@@ -175,6 +184,23 @@ export function loginDeps(c: Ctx): LoginDeps | null {
   const doFetch = c.get("deps").fetch;
   return { db, secret, fetch: doFetch, mailer: createMailer(c.get("adapters"), doFetch) };
 }
+
+/**
+ * 0090 が当たっているか（会員の再認証: 退会・連携の解除・パスキーの削除・全端末ログアウトはログインしてから 15 分以内のセッションだけ）。
+ * 当たっていれば今のセッションの行の id を渡し、DB が確かめる。古い DB には渡さない（引数の無い関数しか無い）
+ */
+async function reauthSessionId(c: Ctx, session: MemberSession): Promise<string | undefined> {
+  const sf = storefrontData(c);
+  return sf && session.sid && (await sf.migratedTo(SECURITY_HARDENING_4_MIGRATION)) ? session.sid : undefined;
+}
+
+/** 15 分を過ぎたセッションからの操作（reauth_required）: この端末のセッションを終えて、ログイン画面に理由を出す */
+async function reauthRedirect(c: Ctx, s: Scope): Promise<Response> {
+  await writeSession(c, s, null);
+  return c.redirect(`${s.shopPath}/account/login?error=reauth`);
+}
+
+const isReauthRequired = (e: unknown): boolean => e instanceof PrivilegedRpcError && e.is("reauth_required");
 
 // ---------- ルート ----------
 export const members = new Hono<AppEnv>();
@@ -439,12 +465,16 @@ async function signIn(c: Ctx, s: Scope, v: { customer_id: string; session_epoch:
  * ログインした端末のセッションを始める（行を作り、その ID を Cookie に入れる）。
  * 世代が変わっていた（ログインの途中で全端末からログアウトされた等）なら false
  */
-async function startWebSession(c: Ctx, s: { shop: { id: string }; shopPath: string }, v: { customer_id: string; session_epoch: number; email: string }): Promise<boolean> {
+async function startWebSession(c: Ctx, s: { shop: { id: string }; shopPath: string }, v: { customer_id: string; session_epoch: number; email: string }, opts: { add?: boolean } = {}): Promise<boolean> {
   const now = Math.floor(Date.now() / 1000);
   const db = privilegedFor(c);
-  const sid = db ? await db.memberSessionStart(s.shop.id, v.customer_id, v.session_epoch, "web", deviceLabel(c.req.header("user-agent")), SESSION_ABSOLUTE_SECONDS) : null;
+  const device = deviceLabel(c.req.header("user-agent"));
+  // パスキーの追加のためだけのセッション（0070）: 短い期限と印（行の label と Cookie の add）
+  const ttl = opts.add ? PASSKEY_ADD_SESSION_SECONDS : SESSION_ABSOLUTE_SECONDS;
+  const label = opts.add ? [PASSKEY_ADD_LABEL, device].filter(Boolean).join(" / ") : device;
+  const sid = db ? await db.memberSessionStart(s.shop.id, v.customer_id, v.session_epoch, "web", label, ttl) : null;
   if (!sid) return false;
-  await writeSession(c, s, { cid: v.customer_id, ep: v.session_epoch, email: v.email, exp: now + SESSION_SECONDS, iat: now, sid, chk: now });
+  await writeSession(c, s, { cid: v.customer_id, ep: v.session_epoch, email: v.email, exp: now + (opts.add ? ttl : SESSION_SECONDS), iat: now, sid, chk: now, ...(opts.add ? { add: true as const } : {}) });
   return true;
 }
 
@@ -513,14 +543,24 @@ members.post("/:shop/account/logout", async (c: Ctx) => {
   const db = privilegedFor(c);
   if (s.session?.sid && db) await db.memberSessionRevoke(s.shop.id, s.session.cid, s.session.ep, s.session.sid, "logout");
   await writeSession(c, s, null);
-  return c.redirect(s.shopPath || "/");
+  // ヘッドレスのパスキーの追加（0070）を途中でやめたときは、連携サイト（許可リストの URL）へ戻す
+  const returnTo = safeReturnUrl((await formFields(c)).return_to, returnOrigins(s.shop.settings), "");
+  return c.redirect(returnTo || s.shopPath || "/");
 });
 
 members.post("/:shop/account/logout-all", async (c: Ctx) => {
   const s = await scope(c);
   if (!s) return notFound(c);
   const db = privilegedFor(c);
-  if (s.session && db) await db.memberLogoutAll(s.shop.id, s.session.cid, s.session.ep);
+  if (s.session && db) {
+    try {
+      // 0090: ログインしてから 15 分以内のセッションだけ（盗まれた Cookie から本人を締め出さない）
+      await db.memberLogoutAll(s.shop.id, s.session.cid, s.session.ep, await reauthSessionId(c, s.session));
+    } catch (e) {
+      if (isReauthRequired(e)) return reauthRedirect(c, s);
+      throw e;
+    }
+  }
   await writeSession(c, s, null);
   return c.redirect(`${s.shopPath}/account/login?info=logged_out_all`);
 });
@@ -563,12 +603,27 @@ members.post("/:shop/account/consent", async (c: Ctx) => {
   return c.redirect(ok ? `${s.shopPath}/account?flash=saved` : `${s.shopPath}/account/login`);
 });
 
-/** 退会: customers 行を消す（注文は残る。注文の個人情報は運営者のマスク運用に従う） */
-members.post("/:shop/account/delete", async (c: Ctx) => {
+/**
+ * 退会: customers 行を消す（注文は残る。注文の個人情報は運営者のマスク運用に従う）。
+ * 0090: ログインしてから 15 分以内のセッションだけ（過ぎていれば入り直す）。受け付けたら本人に知らせる（送信元が無ければ送らない）。
+ * フォームの送信だけ受ける（テーマの JS の fetch からは消せない）
+ */
+members.post("/:shop/account/delete", navigateOnly, async (c: Ctx) => {
   const s = await scope(c);
   if (!s) return notFound(c);
-  await withMember(c, s, (db, m) => db.memberWithdraw(s.shop.id, m.cid, m.ep));
+  const db = privilegedFor(c);
+  if (!s.session || !db) return c.redirect(`${s.shopPath}/account/login`);
+  let r: Awaited<ReturnType<PrivilegedDb["memberWithdraw"]>>;
+  try {
+    r = await db.memberWithdraw(s.shop.id, s.session.cid, s.session.ep, await reauthSessionId(c, s.session));
+  } catch (e) {
+    if (isReauthRequired(e)) return reauthRedirect(c, s);
+    throw e;
+  }
   await writeSession(c, s, null);
+  if (!r.ok) return c.redirect(`${s.shopPath}/account/login`);
+  const ld = loginDeps(c);
+  if (ld && r.mail_from && r.email) await afterResponse(c, sendWithdrawNotice(ld, s.shop, { from: r.mail_from, to: r.email }));
   return c.redirect(s.shopPath || "/");
 });
 
@@ -674,7 +729,7 @@ members.get("/:shop/account/passkey/add", async (c: Ctx) => {
   return c.html(s.theme.MemberAuthPage({ ctx: ctxOf(s), mode: "passkey_add", ticket, returnTo }));
 });
 
-members.post("/:shop/account/passkey/add", async (c: Ctx) => {
+members.post("/:shop/account/passkey/add", navigateOnly, async (c: Ctx) => {
   const s = await scope(c);
   const deps = loginDeps(c);
   if (!s || !deps || !passkeyReady(c, s.shop)) return notFound(c);
@@ -685,8 +740,9 @@ members.post("/:shop/account/passkey/add", async (c: Ctx) => {
   const r = await deps.db.memberPasskeyTicketTake(s.shop.id, m[1]!, await linkHash(deps.secret, m[2]!));
   privatePage(c);
   if (!r.ok) return c.html(s.theme.MemberAuthPage({ ctx: ctxOf(s), mode: "passkey_add", error: t("passkey.add_link_expired"), returnTo }), 400);
-  // この端末のセッション（追加が済んだら取り消す）。作ったばかりなので、パスキーの追加の 15 分の決まりを満たす
-  if (!(await startWebSession(c, s, { customer_id: r.customer_id, session_epoch: r.session_epoch, email: r.email ?? "" }))) {
+  // この端末のセッションは追加のためだけ（20 分・印つき。登録とログアウト以外には使えず、追加が済んだら取り消す）。
+  // 作ったばかりなので、パスキーの追加の 15 分の決まりを満たす
+  if (!(await startWebSession(c, s, { customer_id: r.customer_id, session_epoch: r.session_epoch, email: r.email ?? "" }, { add: true }))) {
     return c.html(s.theme.MemberAuthPage({ ctx: ctxOf(s), mode: "passkey_add", error: t("passkey.add_link_expired"), returnTo }), 400);
   }
   return c.html(s.theme.MemberAuthPage({ ctx: ctxOf(s), mode: "passkey_register", returnTo }));
@@ -843,9 +899,14 @@ members.post("/:shop/account/passkeys/:id{[0-9a-f-]{36}}/delete", async (c: Ctx)
   if (!s || !passkeyReady(c, s.shop)) return notFound(c);
   const db = privilegedFor(c);
   if (!s.session || !db) return c.redirect(`${s.shopPath}/account/login`);
-  // false は「無い・他人のもの」か「古いセッション」。古いセッションなら一覧の画面がログインへ送る
-  const ok = await db.memberPasskeyDelete(s.shop.id, s.session.cid, s.session.ep, c.req.param("id") ?? "");
-  return c.redirect(ok ? `${s.shopPath}/account/passkeys?flash=deleted` : `${s.shopPath}/account/passkeys`);
+  // false は「無い・他人のもの」か「古いセッション」。古いセッションなら一覧の画面がログインへ送る。0090: 15 分を過ぎていれば入り直す
+  try {
+    const ok = await db.memberPasskeyDelete(s.shop.id, s.session.cid, s.session.ep, c.req.param("id") ?? "", await reauthSessionId(c, s.session));
+    return c.redirect(ok ? `${s.shopPath}/account/passkeys?flash=deleted` : `${s.shopPath}/account/passkeys`);
+  } catch (e) {
+    if (isReauthRequired(e)) return reauthRedirect(c, s);
+    throw e;
+  }
 });
 
 // ---------- パスワード（0013。店の設定 members_password がオンのとき） ----------
@@ -871,7 +932,8 @@ members.post("/:shop/account/password-login", async (c: Ctx) => {
   return c.redirect(`${s.shopPath}/account`);
 });
 
-members.post("/:shop/account/password", async (c: Ctx) => {
+// フォームの送信だけ受ける（テーマの JS の fetch から入る手段を足されない）
+members.post("/:shop/account/password", navigateOnly, async (c: Ctx) => {
   const s = await scope(c);
   if (!s || (s.shop.settings ?? {})["members_password"] !== true) return notFound(c);
   const db = privilegedFor(c);
@@ -968,7 +1030,7 @@ members.get("/:shop/account/oauth/:provider", async (c: Ctx) => {
   return startOAuth(c, s.shop, p, "login");
 });
 
-members.post("/:shop/account/oauth/:provider/link", async (c: Ctx) => {
+members.post("/:shop/account/oauth/:provider/link", navigateOnly, async (c: Ctx) => {
   const s = await scope(c);
   const p = providerOf(c);
   if (!s || !p) return notFound(c);
@@ -983,9 +1045,11 @@ members.post("/:shop/account/oauth/:provider/unlink", async (c: Ctx) => {
   const db = privilegedFor(c);
   if (!s.session || !db) return c.redirect(`${s.shopPath}/account/login`);
   try {
-    const ok = await db.memberUnlinkIdentity(s.shop.id, s.session.cid, s.session.ep, p);
+    // 0090: ログインしてから 15 分以内のセッションだけ
+    const ok = await db.memberUnlinkIdentity(s.shop.id, s.session.cid, s.session.ep, p, await reauthSessionId(c, s.session));
     return c.redirect(ok ? `${s.shopPath}/account?flash=oauth_unlinked` : `${s.shopPath}/account`);
   } catch (e) {
+    if (isReauthRequired(e)) return reauthRedirect(c, s);
     if (e instanceof Error && /last_login_method/.test(e.message)) return c.redirect(`${s.shopPath}/account?error=last_method`);
     throw e;
   }

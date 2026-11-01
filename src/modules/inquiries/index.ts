@@ -203,7 +203,8 @@ export async function sendAssignNotice(deps: { mailer: Mailer | null; adminBase:
   return trySend(deps.mailer, { from: r.mail_from, to: r.to, ...buildShopNotice("assign", shop, { number: r.number }, `${deps.adminBase}/admin/shops/${shop.id}/modules/inquiries/${r.inquiry_id}`) });
 }
 
-export type SubmitResult = { ok: true; number: number; verified: boolean; mailSent: boolean } | { ok: false; error: InquiryError };
+/** number は、未確認の枠を超えて行を作らなかったときは null（画面・応答は作れたときと同じ形で返す。0089） */
+export type SubmitResult = { ok: true; number: number | null; verified: boolean; mailSent: boolean } | { ok: false; error: InquiryError };
 
 /**
  * 送る。link(token) がメールのリンクの URL（同梱テーマなら /inquiries/open?t=…、ヘッドレスなら連携サイトの画面）。
@@ -230,6 +231,8 @@ export async function submitInquiry(
     if (err) return { ok: false, error: err };
     throw e;
   }
+  // 未確認の枠を超えたとき（0089）: 行は無く、メールも送らない。送り直しの案内は出さない（受付番号が無く、送り直せるものも無い）
+  if (r.number === null) return { ok: true, number: null, verified: r.verified, mailSent: true };
   const mailSent = r.send ? await trySend(deps.mailer, { from: r.mail_from, to: r.to, ...buildCustomerMail(r.kind, shop, r.number, opts.link(token)) }) : false;
   await notifyShop(deps, shop, r.notify, r.mail_from, "new", { id: r.id, number: r.number, category: input.category });
   return { ok: true, number: r.number, verified: r.verified, mailSent };
@@ -263,6 +266,15 @@ export async function replyAsCustomer(
   if (!text) return { ok: false, error: "invalid" };
   const a = await accessOf(deps, access);
   if (!a) return { ok: false, error: "not_found" };
+  if (files.length > 0) {
+    // 添付を置き場に置くのは、DB で「開けるチケットで、閉じていない」と確かめてから（形だけのトークンで置き場に書かせない）。
+    // 添付の無い返事は DB の関数が同じことを確かめるので、往復を増やさない
+    const g = await deps.db.inquiryGet(shop.id, a);
+    if (!g) return { ok: false, error: "not_found" };
+    if (g.inquiry.status === "closed") return { ok: false, error: "closed" };
+    // リンクを初めて開いたことになるなら、開いたときと同じく運営者に知らせる
+    await notifyShop(deps, shop, g.notify, g.mail_from, "new", { id: g.inquiry.id, number: g.inquiry.number, category: g.inquiry.category });
+  }
   const stored = await storeFor(deps, shop.id, files);
   if (!stored.ok) return stored;
   let r;
@@ -293,7 +305,7 @@ export async function resendInquiryLink(
   shop: InquiryMailShop,
   number: number,
   email: string,
-  opts: { ip: string | null; link: (token: string) => string },
+  opts: { ip: string | null; link: (token: string) => string; defer?: (work: Promise<unknown>) => Promise<void> },
 ): Promise<{ ok: true } | { ok: false; error: InquiryError }> {
   const token = randomToken(32);
   let r;
@@ -304,7 +316,12 @@ export async function resendInquiryLink(
     if (err) return { ok: false, error: err };
     throw e;
   }
-  if (r.send && r.to && r.number !== null) await trySend(deps.mailer, { from: r.mail_from, to: r.to, ...buildCustomerMail("link", shop, r.number, opts.link(token)) });
+  // メールは応答を返した後に送る（defer = afterResponse。合ったときだけ応答が遅くならないように。trySend は失敗を握る）
+  if (r.send && r.to && r.number !== null) {
+    const work = trySend(deps.mailer, { from: r.mail_from, to: r.to, ...buildCustomerMail("link", shop, r.number, opts.link(token)) });
+    if (opts.defer) await opts.defer(work);
+    else await work;
+  }
   return { ok: true };
 }
 

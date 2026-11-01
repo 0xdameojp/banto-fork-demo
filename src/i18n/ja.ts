@@ -2372,6 +2372,14 @@ export const ja = {
   "inq.template_body": "本文",
   "inq.template_insert": "差し込む",
   "inq.template_default_name": "お客様",
+  "passkey.add_cancel": "やめて元のサイトに戻る",
+  "pages.body_too_large": "本文が大きすぎます。",
+  "inq.sent_nonumber": "お問い合わせを受け付けました。",
+  "member.withdraw_subject": "【{shop}】退会を受け付けました",
+  "member.withdraw_heading": "退会を受け付けました",
+  "member.withdraw_intro": "{time} に、{email} の会員のアカウントの退会を受け付けました。会員の情報は削除しました（ご注文の記録は残ります）。",
+  "member.withdraw_advice": "ご本人の操作なら、このメールは破棄してください。心当たりがない場合は、お店にお問い合わせください。",
+  "member.withdraw_body": "{intro}\n\n{advice}\n\n{shop}",
 } as const;
 
 export type MessageKey = keyof typeof ja;

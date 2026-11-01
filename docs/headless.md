@@ -358,7 +358,7 @@ A・B では Banto の画面が表示を担いますが、**C では連携側の
 - **パスキー**（`passkey`。同梱モジュール passkey、ショップに独自ドメインがあるときだけ）: ブラウザで `GET /api/shops/<shop>/members/passkey?return_to=<許可リストの URL>` を開くと、**ショップのドメインの** パスキーの画面へ進み、ログインすると `<return_to>?banto_handoff=<券>` に戻ります。あとは LINE・Google と同じく `verify` `{ "handoff" }` でトークンに引き換えます。パスキーはショップのドメインに結びつくので、連携サイトの画面の上では使いません。
   - **パスキーの追加**（0070）: `POST /api/shops/<shop>/members/passkey/add` `{ "return_to": "<許可リストの URL>" }`（Bearer）→ `{ "url", "expires_in": 120 }`。会員のブラウザを `url`（ショップのドメインの追加の画面）へ送ると、ボタンを 2 回（続ける → この端末のパスキーを追加）押して、`<return_to>?banto_passkey=added` に戻ります。券は 2 分・1 回限りです。
   - 追加できるのは **ログインしてから 15 分以内の会員トークン** だけです（盗まれたトークンからパスキーを足して居座れないように。会員ページと同じ決まり）。過ぎていたら 403 `reauth`。login からやり直してもらってから呼んでください。追加すると、会員に「パスキーを追加しました」のメールが届きます。
-  - 追加のためにショップのドメインに作るログインは、追加が済むと取り消します（その端末に Banto のログインは残りません）。
+  - 追加のためにショップのドメインに作るログインは **追加のためだけのもの** です（20 分で切れ、パスキーの登録と「やめる」以外には使えません。会員ページやパスワードの変更は開けません）。追加が済むと取り消し、「やめて元のサイトに戻る」を押しても取り消して `return_to` へ戻します（その端末に Banto のログインは残りません）。
 - **LINE・Google**（`line`・`google`）: ブラウザで `GET /api/shops/<shop>/members/oauth/<line|google>?return_to=<許可リストの URL>` を開くと同意画面へ進み、戻ると `<return_to>?banto_handoff=<券>` に戻ります（失敗したら `banto_error=…`）。連携側は `POST /api/shops/<shop>/members/verify` `{ "handoff": "<券>" }` でトークンに引き換えます（2 分・1 回限り。トークンそのものは URL に載せません）。
 
 トークンはショップごとです（別のショップでは使えません）。本文で受け渡すので、Cookie は使いません。保存するなら連携側のサーバーのセッションに置き、ブラウザの localStorage には置かないでください。
@@ -431,7 +431,7 @@ GET  /api/shops/<shop>/members/orders/<番号>/receipt    （会員トークン�
 ```
 
 - **ゲストの注文**は、注文番号と注文時のメールアドレスで開きます（同梱テーマの注文照会と同じ）。合わなければ `404 not_found`（番号とアドレスのどちらが違ったかは返しません）。`order_token`（24 時間）は領収書と、この注文についてのお問い合わせ（`/inquiries` の `order_token`）にそのまま渡せます。
-- **会員の注文**は会員トークンで開きます（その会員の注文だけ。別の会員の注文・ゲストで買った注文は `404 not_found`）。ゲストで買った注文は会員に結びつけません（番号とメールアドレスで開いてください）。
+- **会員の注文**は会員トークンで開きます（その会員の注文だけ。別の会員の注文・ゲストで買った注文は `404 not_found`）。ゲストで買った注文は会員に結びつけません（番号とメールアドレスで開いてください）。逆に、**会員として買った注文は番号とメールアドレスでは開けません**（`404 not_found`。0089。注文メールのリンクに `banto_member=1` が付くのはこのためです）。
 - `order` は `number` `status`（`paid` / `shipped` / `cancelled` / `refunded`）`created_at` `shipped_at` `total_jpy` `shipping_jpy` `discount_jpy` `discounts` `tracking`（`carrier` `number`）`items`（`name` `sku` `qty` `unit_price_jpy` `tax_rate`）など。**住所・メールアドレスは返しません。**
 - `receipt`（同梱モジュール receipt が ON で、支払い済み・発送済みの注文だけ。ほかは `409 receipt_not_available`、モジュールが OFF なら `404 receipt_disabled`）は、領収書（適格簡易請求書）の記載事項と計算結果です: `kind`（登録番号があれば `qualified_simplified_invoice`、無ければ `receipt`）`issuer` `invoice_number` `proviso`（但し書き）`issued_at` `number` `order_date` `items`（`line_total_jpy`、軽減税率の対象は `reduced: true`。表示に ※ を付けて凡例を添える）`shipping_jpy` `discounts` `total_jpy` `tax`（税率ごとの `rate` `amount_jpy`（税込の対象額）`tax_jpy`（うち消費税額））。**税の計算は Banto の結果をそのまま表示してください**（連携側で計算し直すと端数が合わなくなります）。宛名は購入者が連携側の画面で入れるものとして、Banto は受け取りません。
 - 応答はキャッシュさせません（`Cache-Control: no-store`）。メールアドレスを URL に載せないため、ゲストの呼び出しは POST です。
@@ -461,7 +461,7 @@ GET  /api/shops/<shop>/members/orders/<番号>/receipt    （会員トークン�
 
 入れなければ、リンクは Banto の注文照会の画面（`/<shop>/orders/lookup?banto_order=…`）になります。同梱テーマも同じ動きです（会員の注文はログインしていればそのまま出し、していなければログインしてから戻します。ゲストの注文は番号を埋めてメールアドレスを入れてもらいます）。
 
-回数の上限（0067）: 外れた照会（番号かメールアドレスが違う）を数え、同じ IP から 1 時間に 20 回（ショップ設定のヘッドレス連携で変えられる）、同じ注文番号へ 1 時間に 50 回を超えると `429 too_many_requests` になります（同梱テーマの注文照会の画面も同じ）。合った照会は数えません。サーバー側で中継する構成では、中継元の IP を宣言して `X-Banto-Client-IP` を付けてください（下の「サーバー側で中継するとき」。付けないとサイト全体で 1 つの IP として数えられます）。
+回数の上限（0067 / 0089）: 外れた照会（番号かメールアドレスが違う）を数え、同じ IP から 1 時間に 20 回（ショップ設定のヘッドレス連携で変えられる）、同じメールアドレスで 1 時間に 20 回、ショップ全体で 1 時間に 200 回（`settings.order_lookup.per_hour`）、同じ注文番号へ 1 時間に 50 回を超えると `429 too_many_requests` になります（同梱テーマの注文照会の画面も同じ）。合った照会は数えません。サーバー側で中継する構成では、中継元の IP を宣言して `X-Banto-Client-IP` を付けてください（下の「サーバー側で中継するとき」。付けないとサイト全体で 1 つの IP として数えられます）。
 
 | status | `error` | 意味 |
 | --- | --- | --- |
@@ -528,6 +528,7 @@ POST /api/shops/<shop>/inquiries/order-check   { "number": 1001, "email": "..." 
 POST /api/shops/<shop>/inquiries               { "category": "order", "body": "...", "name": "...", "email": "...", "order_number": "1001",
                                                  "order_token": "...", "checkout_token": "...", "return_to": "https://wp.example.com/contact/thread" }
                                                → 201 { number, verified, mail_sent }
+                                                 （同じアドレスの未確認のお問い合わせが 24 時間に 3 件を超えると、行もメールも作らずに同じ形で `number: null` を返します）
 POST /api/shops/<shop>/inquiries/view          { "token": "<リンクのトークン>" } か（会員）{ "number": 3 } → { inquiry }
 POST /api/shops/<shop>/inquiries/reply         { "token" | "number", "body": "..." } → { number }
 POST /api/shops/<shop>/inquiries/resend        { "number": 3, "email": "...", "return_to": "..." } → 202

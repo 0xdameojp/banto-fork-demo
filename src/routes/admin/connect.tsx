@@ -162,7 +162,8 @@ async function beginAndRedirect(c: AdminContext, shopId: string, endpointId: str
   try {
     await owner(c).db.rpc("app_connect_begin", { p_shop_id: shopId, p_endpoint_id: endpointId, p_scopes: scopes, p_ticket_hash: await hashApiToken(ticket) });
   } catch (e) {
-    if (e instanceof DbError) return /scope_not_permitted/.test(e.message) ? "scope" : /app_handle_required/.test(e.message) ? "app_handle" : "generic";
+    // not_found: 無効にした連携・同梱の内部 URL の行はつなげない（0089）
+    if (e instanceof DbError) return /scope_not_permitted/.test(e.message) ? "scope" : /app_handle_required/.test(e.message) ? "app_handle" : /not_found/.test(e.message) ? "not_found" : "generic";
     throw e;
   }
   const to = new URL(connectUrl);
@@ -190,7 +191,7 @@ export function registerConnectRoutes(hooks: Hono<AppEnv>, externalHookUrl: (url
     const f = await formFields(c);
     const url = (f.url ?? "").trim();
     if (!externalHookUrl(url)) return c.redirect(`/admin/shops/${shopId}/hooks?flash=invalid_url`);
-    const manifest = await fetchManifest(url, c.get("deps").fetch);
+    const manifest = await fetchManifest(url, c.get("adapters").publicFetch ?? c.get("deps").fetch);
     if (!connectable(manifest)) return c.redirect(`/admin/shops/${shopId}/hooks?flash=manifest_failed`);
     // 許せるのはマニフェストが求めたスコープのうち、画面で選んだものだけ
     const scopes = (manifest.scopes ?? []).filter((s) => picked.includes(s) && isApiScope(s));
@@ -218,7 +219,7 @@ export function registerConnectRoutes(hooks: Hono<AppEnv>, externalHookUrl: (url
     if (typeof r !== "string") return r;
     // 始められなければ作った行を消す（中途半端な連携を残さない）
     await db.from("hook_endpoints").delete({ id: endpointId, shop_id: shopId });
-    return c.redirect(`/admin/shops/${shopId}/hooks?flash=${r === "scope" ? "connect_scope" : r === "app_handle" ? "invalid_app_handle" : "generic"}`);
+    return c.redirect(`/admin/shops/${shopId}/hooks?flash=${r === "scope" ? "connect_scope" : r === "app_handle" ? "invalid_app_handle" : r === "not_found" ? "not_found" : "generic"}`);
   });
 
   /** つなぎ直す: 同じスコープ（今のマニフェストが求める範囲）で新しい券。引き換えると前のトークンは取り消し、署名シークレットも新しくなる */
@@ -231,12 +232,12 @@ export function registerConnectRoutes(hooks: Hono<AppEnv>, externalHookUrl: (url
     const ep = await owner(c).db.from<{ id: string; url: string }>("hook_endpoints").selectOne("id,url", { eq: { id: endpointId, shop_id: shopId } });
     const conn = ep ? await connectionOf(c, endpointId) : null;
     if (!ep || !conn) return c.text(t("hooks.not_found"), 404);
-    const manifest = await fetchManifest(ep.url, c.get("deps").fetch);
+    const manifest = await fetchManifest(ep.url, c.get("adapters").publicFetch ?? c.get("deps").fetch);
     if (!connectable(manifest)) return c.redirect(`${base}?flash=manifest_failed`);
     const scopes = conn.scopes.filter((s): s is ApiScope => isApiScope(s) && (manifest.scopes ?? []).includes(s));
     await owner(c).db.from("hook_endpoints").update({ manifest }, { id: endpointId, shop_id: shopId });
     const r = await beginAndRedirect(c, shopId, endpointId, scopes, manifest.connect_url);
     if (typeof r !== "string") return r;
-    return c.redirect(`${base}?flash=${r === "scope" ? "connect_scope" : "generic"}`);
+    return c.redirect(`${base}?flash=${r === "scope" ? "connect_scope" : r === "not_found" ? "not_found" : "generic"}`);
   });
 }

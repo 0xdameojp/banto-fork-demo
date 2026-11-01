@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { asService, asUser, closePool, createAuthUser, createShopFixture, dbAvailable, expectDbError, getPool, resetDatabase, withRole, type Fixture } from "./harness";
+import { CONFIRM_SQL, asService, asUser, closePool, createAuthUser, createShopFixture, dbAvailable, expectDbError, getPool, resetDatabase, withRole, type Fixture } from "./harness";
 
 const sha = (t: string) => createHash("sha256").update(t).digest("hex");
 
@@ -40,7 +40,7 @@ describe.skipIf(!dbAvailable)("Low 群の修正（0031_low_fixes）", () => {
     expect(await stock()).toBe(before);
     // Banto で予約して確定した注文は戻る
     const res = await asService(async (c) => (await c.query<{ id: string }>("select reserve_stock($1, $2::jsonb) as id", [f.shopId, JSON.stringify([{ sku_id: f.skuId, qty: 2 }])])).rows[0]!.id);
-    const confirmed = await asService(async (c) => (await c.query<{ id: string }>("select confirm_reservation($1, $2, '{\"payment_provider\":\"stripe\",\"payment_ref\":\"pi_x\"}'::jsonb) as id", [res, f.shopId])).rows[0]!.id);
+    const confirmed = await asService(async (c) => (await c.query<{ id: string }>(CONFIRM_SQL, [res, f.shopId, JSON.stringify({ payment_provider: "stripe", payment_ref: "pi_x" })])).rows[0]!.id);
     expect(await stock()).toBe(before - 2);
     expect(await cancel(confirmed)).toMatchObject({ status: "cancelled", restocked: true });
     expect(await stock()).toBe(before);
@@ -77,8 +77,13 @@ describe.skipIf(!dbAvailable)("Low 群の修正（0031_low_fixes）", () => {
   it("shops: settings の項目では slug / domain / order_seq / tryon_seq を変えられない（name や settings は変えられる）。owner は変えられる", async () => {
     expect((await asUser(settingsStaff, (c) => c.query("update shops set name = 'renamed' where id = $1 returning id", [f.shopId]))).rows).toHaveLength(1);
     expect((await asUser(settingsStaff, (c) => c.query("update shops set settings = settings || '{\"notice\":\"hi\"}' where id = $1 returning id", [f.shopId]))).rows).toHaveLength(1);
-    for (const sql of ["update shops set order_seq = 1 where id = $1", "update shops set tryon_seq = 5 where id = $1", "update shops set domain = 'evil.example' where id = $1", "update shops set slug = 'taken' where id = $1"]) {
+    for (const sql of ["update shops set domain = 'evil.example' where id = $1", "update shops set slug = 'taken' where id = $1"]) {
       expect(await expectDbError(() => asUser(settingsStaff, (c) => c.query(sql, [f.shopId]))), sql).toMatch(/admin_required/);
+    }
+    // 採番の列は運営者の JWT からは誰も書けない（0089 の列の権限）
+    for (const sql of ["update shops set order_seq = 1 where id = $1", "update shops set tryon_seq = 5 where id = $1", "update shops set inquiry_seq = 0 where id = $1"]) {
+      expect(await expectDbError(() => asUser(settingsStaff, (c) => c.query(sql, [f.shopId]))), sql).toMatch(/permission denied/);
+      expect(await expectDbError(() => asUser(f.ownerId, (c) => c.query(sql, [f.shopId]))), sql).toMatch(/permission denied/);
     }
     expect((await asUser(f.ownerId, (c) => c.query("update shops set domain = 'shop.example.jp' where id = $1 returning domain", [f.shopId]))).rows[0]).toEqual({ domain: "shop.example.jp" });
   });
