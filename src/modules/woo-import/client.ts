@@ -1487,6 +1487,10 @@ export function wooImporter() {
     large?: { slug: string; url: string }[];
     /** クーポンの CSV 取り込みの画面（同梱モジュール coupons、0043）。要確認のクーポンを直したら、ここから入れる */
     couponImport: string;
+    /** 本画像の横幅（ショップの設定、src/media/variants.ts）。無ければ 1600 */
+    imageMax?: number;
+    /** 作る中間の段の横幅（0091 が当たっていなければ空） */
+    variantSizes?: number[];
   }
 
   function mount(root: El, cfg: MountConfig) {
@@ -1548,7 +1552,7 @@ export function wooImporter() {
 
     /**
      * 5MB を超える画像を、このブラウザで縮小して取り込む（サーバーでは縮小しない）。
-     * 元の画像は Banto が中継し（旧サイトの画像はブラウザから直接読めないため）、長辺 1600px と 400px の WebP にして送る。
+     * 元の画像は Banto が中継し（旧サイトの画像はブラウザから直接読めないため）、横幅をショップの設定（既定 1600px）・400px・中間の段（0091）に合わせた WebP にして送る（高さは 4096px まで）。
      * メモリを使うので 1 枚ずつ。
      */
     interface Bitmap {
@@ -1565,7 +1569,8 @@ export function wooImporter() {
     const g = globalThis as unknown as { createImageBitmap?: (b: Blob) => Promise<Bitmap>; document: { createElement(tag: "canvas"): Canvas } };
     const shrink = (bmp: Bitmap, max: number, quality: number) =>
       new Promise<Blob>((ok, ng) => {
-        const r = Math.min(1, max / Math.max(bmp.width, bmp.height));
+        // 横幅で合わせ、高さは 4096 まで（src/media/variants.ts の fitWidth と同じ。この関数は自己完結なので数字を書く）
+        const r = Math.min(1, max / bmp.width, 4096 / bmp.height);
         const cv = g.document.createElement("canvas");
         cv.width = Math.max(1, Math.round(bmp.width * r));
         cv.height = Math.max(1, Math.round(bmp.height * r));
@@ -1595,9 +1600,13 @@ export function wooImporter() {
             else {
               let main: Blob | null = null;
               let thumb: Blob | null = null;
+              const max = cfg.imageMax ?? 1600;
+              const mainWidth = Math.max(1, Math.round(bmp.width * Math.min(1, max / bmp.width, 4096 / bmp.height)));
+              const variants: { size: number; blob: Blob }[] = [];
               try {
-                main = await shrink(bmp, 1600, 0.82);
+                main = await shrink(bmp, max, 0.82);
                 thumb = await shrink(bmp, 400, 0.8);
+                for (const size of cfg.variantSizes ?? []) if (size > 400 && size < mainWidth) variants.push({ size, blob: await shrink(bmp, size, 0.82) });
               } catch {
                 main = null;
               } finally {
@@ -1611,6 +1620,7 @@ export function wooImporter() {
                 fd.append("url", it.url);
                 fd.append("image", main, "image.webp");
                 fd.append("thumbnail", thumb, "thumbnail.webp");
+                for (const v of variants) fd.append(`variant_${v.size}`, v.blob, `v${v.size}.webp`);
                 const up = await fetch(`${cfg.base}/images/resized`, { method: "POST", body: fd, credentials: "same-origin" });
                 if (up.ok) added++;
                 else fail(`request_${up.status}`);

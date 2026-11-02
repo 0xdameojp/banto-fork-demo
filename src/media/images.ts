@@ -1,3 +1,5 @@
+import { DEFAULT_IMAGE_MAX, THUMB_WIDTH, imageLadder, type SizedImage } from "./variants";
+
 /** 商品画像のアップロード規則（StorageAdapter に渡す前の検証） */
 export const IMAGE_TYPES: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -90,7 +92,7 @@ export function imageUrl(mediaBaseUrl: string, key: string): string {
   return `${mediaBaseUrl.replace(/\/+$/, "")}/${key}`;
 }
 
-/** サムネイルの上限（ブラウザ側で長辺 400px の WebP に縮小したもの。念のため 1MB） */
+/** サムネイルの上限（ブラウザ側で横幅 400px の WebP に縮小したもの。0091 より前は長辺 400px。念のため 1MB） */
 export const MAX_THUMB_BYTES = 1024 * 1024;
 
 /** 本画像のキーからサムネイルのキーを作る（同じディレクトリ、拡張子の前に .thumb） */
@@ -113,14 +115,11 @@ export interface ResponsiveImage {
 }
 
 /**
- * テーマ用: サムネイルがあれば srcset（400w / 本画像）を出す。無ければ本画像だけ。
- * 寸法は本画像のもの。サムネイルは同じ縦横比なので width/height 属性はレイアウトの確保にそのまま使える。
+ * テーマ用: 持っている段（サムネイル・中間（0091）・本画像。src/media/variants.ts）で srcset を出す。サムネイルが無ければ本画像だけ。
+ * 寸法は本画像のもの。どの段も同じ縦横比なので width/height 属性はレイアウトの確保にそのまま使える。
+ * src はいちばん小さい段（srcset を読まない古いブラウザ向け）。
  */
-export function responsiveImage(
-  mediaBaseUrl: string,
-  img: { storage_key: string; thumb_key?: string | null; width?: number | null; height?: number | null },
-  opts: { sizes?: string; thumbWidth?: number; fullWidth?: number } = {},
-): ResponsiveImage {
+export function responsiveImage(mediaBaseUrl: string, img: SizedImage, opts: { sizes?: string } = {}): ResponsiveImage {
   const full = imageUrl(mediaBaseUrl, img.storage_key);
   const out: ResponsiveImage = { src: full };
   if (img.width && img.height) {
@@ -128,11 +127,10 @@ export function responsiveImage(
     out.height = img.height;
   }
   if (img.thumb_key) {
-    const thumb = imageUrl(mediaBaseUrl, img.thumb_key);
-    const fullW = img.width ?? opts.fullWidth ?? 1600;
-    const thumbW = Math.min(opts.thumbWidth ?? 400, fullW);
-    out.src = thumb;
-    out.srcset = thumbW < fullW ? `${thumb} ${thumbW}w, ${full} ${fullW}w` : `${full} ${fullW}w`;
+    const ladder = imageLadder(img);
+    out.src = imageUrl(mediaBaseUrl, img.thumb_key);
+    // 寸法が分からない画像（前からある一部）は、サムネイル 400w と本画像（1600 とみなす）
+    out.srcset = ladder.length ? ladder.map((x) => `${imageUrl(mediaBaseUrl, x.key)} ${x.width}w`).join(", ") : `${out.src} ${THUMB_WIDTH}w, ${full} ${DEFAULT_IMAGE_MAX}w`;
     out.sizes = opts.sizes ?? "(max-width: 40rem) 50vw, 14rem";
   }
   return out;
