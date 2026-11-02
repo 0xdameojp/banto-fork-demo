@@ -373,6 +373,7 @@ export const ja = {
   "axes.mode_none": "決めない（SKU の選択肢は自由）",
   "axes.mode_only_code": "品番だけ（選択肢なし）",
   "axes.mode_axes": "軸で分ける",
+  "axes.fields_hint": "軸の欄に入力すると「軸で分ける」に切り替わります。ほかを選んでいるあいだ、欄の中身は保存されません。",
   "axes.key": "項目（例: カラー）",
   "axes.values": "値の候補（Enter で 1 つずつ足す。スクリプトが動かないときは 1 行に 1 つ）",
   "axes.shop": "ショップの既定",
@@ -2432,6 +2433,12 @@ export const ja = {
   "shop.image_processing_hint": "任せると、アップロードのときは元の写真とサムネイル（横幅 400px）だけを送り、本画像と中間の段は画像を変換できる外部プラグイン（例: banto-plugin-webp）が作って差し替えます。変換が終わるまでの数分は、お店の画面に元の写真が出ます。元の写真は 20MB まで受け付けます。",
   "shop.image_processing_no_plugin": "画像を変換できるプラグインがつながっていません。このままだと元の写真がそのままお店に出ます。連携の画面でプラグインをつなぐか、「ブラウザで変換する」に戻してください。",
   "image.plugin_note": "元の写真をそのまま送り（20MB まで）、ブラウザはサムネイル（横幅 400px）だけを作ります。本画像と中間の段は、外部の変換プラグインが数分のうちに作って差し替えます（ショップの設定「商品画像の変換」）。",
+  "axes.names_title": "選択肢の名前",
+  "axes.names_hint": "SKU の選択肢（サイズ・カラーなど）の表示名です。名前を変えても、SKU・画像の結び付け・軸は変わりません（中では左の英字の key でつながっています）。お店の画面・テーマ・API の表示名が変わります。",
+  "axes.names_key": "key",
+  "axes.names_name": "表示名",
+  "axes.names_saved": "選択肢の名前を保存しました。",
+  "axes.names_invalid": "選択肢の名前を保存できませんでした。名前は 1〜40 文字で、ほかの選択肢と同じ名前にはできません。",
 } as const;
 
 export type MessageKey = keyof typeof ja;

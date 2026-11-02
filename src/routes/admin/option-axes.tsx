@@ -1,19 +1,20 @@
 import { DbError } from "../../db/client";
 import { t, tf } from "../../i18n";
 import { MAX_AXES, axesLabel, optionAxesOf, type OptionAxes } from "../../products/option-axes";
+import { optionLabel, type OptionNames } from "../../products/option-names";
 
 /**
  * SKU を分ける軸（0065）の入力欄。ショップの既定・カテゴリー・商品の 3 か所で使う。
  *   mode: inherit（カテゴリー: 上の段を引き継ぐ）/ none（決めない）/ only_code（品番だけ）/ axes（軸で分ける）
  * 値は src/products/option-axes.ts の optionAxesFromForm で読む
  */
-export function AxesEditor(props: { name: string; axes: unknown; modes: ("inherit" | "none" | "only_code" | "axes")[] }) {
+export function AxesEditor(props: { name: string; axes: unknown; modes: ("inherit" | "none" | "only_code" | "axes")[]; names?: OptionNames }) {
   const axes = optionAxesOf(props.axes);
   const current = props.axes === null || props.axes === undefined ? props.modes[0]! : axes && axes.length === 0 ? "only_code" : "axes";
   const rows: (OptionAxes[number] | null)[] = [...(axes ?? []), ...Array<null>(MAX_AXES).fill(null)].slice(0, MAX_AXES);
   const modeLabel = { inherit: t("axes.mode_inherit"), none: t("axes.mode_none"), only_code: t("axes.mode_only_code"), axes: t("axes.mode_axes") } as const;
   return (
-    <div>
+    <div data-axes-editor="">
       <p>
         {props.modes.map((m) => (
           <label style="display:inline-block;margin-right:1rem">
@@ -32,7 +33,7 @@ export function AxesEditor(props: { name: string; axes: unknown; modes: ("inheri
           {rows.map((a, i) => (
             <tr>
               <td>
-                <input type="text" name={`axis.${i}.key`} value={a?.key ?? ""} maxlength={40} aria-label={`${props.name} ${t("axes.key")} ${i + 1}`} style="width:10rem" />
+                <input type="text" name={`axis.${i}.key`} value={a ? optionLabel(props.names ?? {}, a.key) : ""} maxlength={40} aria-label={`${props.name} ${t("axes.key")} ${i + 1}`} style="width:10rem" />
               </td>
               <td>
                 <ChipsInput name={`axis.${i}.values`} values={a?.values ?? []} label={`${props.name} ${t("axes.values")} ${i + 1}`} />
@@ -41,9 +42,27 @@ export function AxesEditor(props: { name: string; axes: unknown; modes: ("inheri
           ))}
         </tbody>
       </table>
+      {props.modes.includes("axes") ? <p class="muted">{t("axes.fields_hint")}</p> : null}
+      <script dangerouslySetInnerHTML={{ __html: AXES_MODE_SCRIPT }} />
     </div>
   );
 }
+
+/**
+ * 軸の欄に入力したら「軸で分ける」に切り替える（「決めない」のまま入れて保存し、入れた軸が消えるのを防ぐ）。
+ * 「軸で分ける」以外のあいだは欄を薄くして、使われないことを見せる（入力はできる。入れたら切り替わる）。
+ * 直前の要素（この script を含む div[data-axes-editor]）だけを相手にするので、1 画面に何個あってもよい
+ */
+const AXES_MODE_SCRIPT = `(function(){
+  var box=document.currentScript&&document.currentScript.parentNode;if(!box)return;
+  var axes=box.querySelector('input[name=axes_mode][value=axes]'),table=box.querySelector("table");if(!axes||!table)return;
+  function paint(){table.style.opacity=axes.checked?"":"0.55";}
+  function use(){if(!axes.checked){axes.checked=true;paint();}}
+  table.addEventListener("input",use);table.addEventListener("paste",use);
+  table.addEventListener("keydown",function(e){if(e.key==="Enter"||e.key==="Backspace")use();});
+  [].slice.call(box.querySelectorAll("input[name=axes_mode]")).forEach(function(r){r.addEventListener("change",paint);});
+  paint();
+})();`;
 
 /**
  * 値をチップで入れる欄。正体は「1 行に 1 つ」の textarea（スクリプトが無ければそのまま使う）。
@@ -96,7 +115,7 @@ export const CHIPS_SCRIPT = `(function(){
 })();`;
 
 /** 軸の短い表示（「カラー × サイズ」・「品番だけ」・「決めていない」） */
-export const axesText = (v: unknown) => axesLabel(v === null || v === undefined ? null : optionAxesOf(v), t("axes.label_only_code"), t("axes.label_none"));
+export const axesText = (v: unknown, names: OptionNames = {}) => axesLabel(v === null || v === undefined ? null : optionAxesOf(v), t("axes.label_only_code"), t("axes.label_none"), names);
 
 /** DB の守り（0065 のトリガー）のエラー → 画面のお知らせの種類 */
 export function axesErrorCode(e: unknown): "axes_mismatch" | "axes_duplicate" | "axes_invalid" | null {
