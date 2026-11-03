@@ -59,7 +59,11 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     if(at&&p.contains(at)){ var r=document.createRange(); r.setStart(at,Math.min(off,at.nodeType===3?(at.nodeValue||"").length:at.childNodes.length)); r.collapse(true); s.removeAllRanges(); s.addRange(r); }
   }
   if(!(ed.textContent||"").trim()&&!ed.querySelector("img,hr,table,[data-banto-block]")) ed.innerHTML="<p><br></p>";
-  ed.addEventListener("input",wrapLoose);
+  // 日本語などの変換のあいだは本文の要素に手を出さない（書き換えると変換が途切れ、最初の文字が二重になる）。確定してから整える
+  var composing=false;
+  ed.addEventListener("compositionstart",function(){ composing=true; });
+  ed.addEventListener("compositionend",function(){ composing=false; setTimeout(function(){ wrapLoose(); afterInput(); },0); });
+  ed.addEventListener("input",function(e){ if(composing||e.isComposing) return; wrapLoose(); });
 
   // 図（線画。決まった文字列だけを innerHTML に入れる）
   function svg(d){ return '<svg class="blk-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+d+'</svg>'; }
@@ -95,13 +99,14 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     gallery:'<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
     accordion:'<rect x="3" y="4" width="18" height="6" rx="1"/><path d="M3 14h18M3 19h18M15 6.5l1.5 1.5 1.5-1.5"/>',
     spacer:'<path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/>',
+    audience:'<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/><rect x="2" y="2" width="20" height="20" rx="3" stroke-dasharray="3 2"/>',
     parent:'<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v5"/>'
   };
   // レイアウトのブロック（src/pages/layout.ts の値と既定・文言。サーバーが data-layout に入れる）
   var LAY={}; try{ LAY=JSON.parse(form.getAttribute("data-layout")||"{}"); }catch(_){}
   var LS=LAY.schema||{}, LTX=LAY.t||{}, DEPTH=LAY.depth||4;
   function LT(k){ return LTX[k]||""; }
-  var CONT={group:1,columns:1,column:1,cover:1,media:1,gallery:1,accordion:1};
+  var CONT={group:1,columns:1,column:1,cover:1,media:1,gallery:1,accordion:1,audience:1};
   // 文字を書けない箱（押すと選ぶ）
   var BOXES={products:1,button:1,spacer:1,gallery:1,articles:1,app:1};
   // テーマのパターン・スタイル（サーバーが data-* の JSON で渡す。パターンの本文は選んだときに受け取る）
@@ -114,7 +119,7 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
   var BLOCKS=[
     ["p","text"],["h2","text"],["h3","text"],["ul","text"],["ol","text"],["q","text"],["table","text"],["accordion","text"],
     ["img","media"],["gallery","media"],["cover","media"],["media","media"],
-    ["group","design"],["columns","design"],["spacer","design"],["hr","design"],
+    ["group","design"],["columns","design"],["spacer","design"],["hr","design"],["audience","design"],
     ["products","shop"],["articles","shop"],["button","shop"]
   ].filter(function(x){ return (!(CONT[x[0]]||x[0]==="spacer")||LS[x[0]])&&(x[0]!=="articles"||HAS_ARTICLES); }).map(function(x){ var lay=!!LS[x[0]]; return {k:x[0],g:x[1],label:lay?LT("kind."+x[0]):T(x[0]),desc:lay?LT("desc."+x[0]):T("d-"+x[0])}; })
    .concat(PATTERNS.map(function(p){ return {k:"pattern:"+p.name,g:p.source==="theme"?"theme":"patterns",label:p.title,desc:p.description||"",pattern:p.name}; }))
@@ -152,7 +157,7 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     var k=d.getAttribute("data-banto-block"), g=function(x){ return d.getAttribute("data-"+x)||""; }, keep=d.classList.contains("is-sel");
     var c={group:"banto-group banto-bg-"+g("bg")+" banto-pad-"+g("pad"),columns:"banto-columns banto-cols-"+g("ratio")+" banto-valign-"+g("valign"),column:"banto-column",
       cover:"banto-cover banto-cover--h-"+g("height")+" banto-cover--overlay-"+g("overlay")+" banto-align-"+g("align")+" banto-valign-"+g("valign")+" banto-cover--focus-"+g("focus"),media:"banto-media banto-media--"+g("side")+" banto-valign-"+g("valign"),
-      gallery:"banto-gallery banto-gallery--"+g("cols"),accordion:"banto-accordion banto-accordion--"+g("icon"),spacer:"banto-spacer banto-spacer--"+g("size")}[k];
+      gallery:"banto-gallery banto-gallery--"+g("cols"),accordion:"banto-accordion banto-accordion--"+g("icon"),spacer:"banto-spacer banto-spacer--"+g("size"),audience:"banto-audience"}[k];
     var stl=g("style"); if(c) d.className=c+(stl&&/^[a-z0-9][a-z0-9-]{0,29}$/.test(stl)?" banto-style-"+stl:"")+(keep?" is-sel":"");
   }
   var RATIO_OF={2:"1-1",3:"1-1-1",4:"1-1-1-1"};
@@ -188,7 +193,14 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     else if(kind==="gallery"){ d.setAttribute("contenteditable","false"); d.setAttribute("data-ph",LT("gallery_empty")); }
     else if(kind==="accordion"){ var t=el("div","banto-accordion__title"); t.setAttribute("data-acc-title",""); t.appendChild(document.createElement("br")); d.appendChild(t); d.appendChild(slotDiv("banto-accordion__body")); }
     else if(kind==="spacer"){ d.setAttribute("contenteditable","false"); d.setAttribute("aria-hidden","true"); }
+    else if(kind==="audience"){ var al=el("div","banto-audience__label"); al.setAttribute("contenteditable","false"); d.appendChild(al); d.appendChild(slotDiv("banto-audience__body")); audienceLabel(d); }
     cls(d); return d;
+  }
+  // 見せる相手の囲み（0097）: 選んだ条件の名前を data-title と目印に写す（保存する書式の title。お客様には出ない）
+  function audienceLabel(d){
+    var nm=LT("opt.id."+(d.getAttribute("data-id")||""));
+    if(nm) d.setAttribute("data-title",nm); else d.removeAttribute("data-title");
+    var al=d.querySelector(":scope > .banto-audience__label"); if(al) al.textContent=LT("audience_label").replace("{name}",nm||d.getAttribute("data-title")||"?");
   }
   // 画像: カバーは背景、画像と文は左右の画像、ギャラリーは並べる
   function setImage(d,url){
@@ -216,7 +228,8 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     if(n.nodeType===1&&isSlot(n)) return n.children[Math.min(s.anchorOffset,n.children.length-1)]||null;
     return blockOf(n);
   }
-  function caretIn(el){ var r=document.createRange(); r.selectNodeContents(el); r.collapse(false); var s=window.getSelection(); s.removeAllRanges(); s.addRange(r); saved=r.cloneRange(); }
+  // 終わりの改行（空の行の <br>）の後ろには置かない（そこで日本語の変換を始めると、ブラウザが <br> を消すときに変換が途切れて最初の文字が二重になる）
+  function caretIn(el){ var r=document.createRange(); r.selectNodeContents(el); var lb=el.lastChild; if(lb&&lb.nodeName==="BR") r.setEndBefore(lb); r.collapse(false); var s=window.getSelection(); s.removeAllRanges(); s.addRange(r); saved=r.cloneRange(); }
   function emptyP(){ var p=document.createElement("p"); p.appendChild(document.createElement("br")); return p; }
   function el(tag,cls,html){ var x=document.createElement(tag); if(cls) x.className=cls; if(html) x.innerHTML=html; return x; }
   function btn(cls,op,ico,label,text){ var b=el("button",cls,(ico?svg(ICO[ico]):"")+(text?"<span></span>":"")); b.type="button"; if(op) b.setAttribute("data-op",op); b.title=label; b.setAttribute("aria-label",label); if(text) b.lastChild.textContent=text; return b; }
@@ -245,7 +258,7 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
   function clearSel(){ if(sel&&sel.classList) sel.classList.remove("is-sel"); sel=null; refresh(); }
   // 文字を書けない箱（商品・ボタン）を押して選んだら、次に別の所を押すか打つまでそのまま
   var pin=null;
-  document.addEventListener("selectionchange",function(){ if(pin) return; var b=current(); if(b){ remember(); select(b); } });
+  document.addEventListener("selectionchange",function(){ if(pin||composing) return; var b=current(); if(b){ remember(); select(b); } });
   ed.addEventListener("focus",refresh); ed.addEventListener("blur",function(){ setTimeout(refresh,0); });
   // 入力しているあいだは道具を隠す（マウスを動かすとまた出る。WordPress と同じ）
   ed.addEventListener("keydown",function(e){
@@ -515,14 +528,15 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
     else if(e.key==="Enter"){ e.preventDefault(); chooseMenu(menuSel); }
     else if(e.key==="Escape"){ e.preventDefault(); closeMenu(); }
   });
-  ed.addEventListener("input",function(){
+  ed.addEventListener("input",function(e){ if(composing||e.isComposing) return; afterInput(); });
+  function afterInput(){
     // 中身を消し切った囲み（カバー・グループなど）にも書き始める段落を残す（無いと中へ何も入れられなくなる）
     Array.prototype.forEach.call(ed.querySelectorAll("[data-slot]"),function(x){ if(!isCols(x)&&!x.children.length){ var p0=emptyP(); x.appendChild(p0); var s0=window.getSelection(); if(s0.rangeCount&&x.contains(s0.anchorNode)) caretIn(p0); } });
     var blk=current(); var txt=blk?(blk.textContent||""):"";
     if(blk&&blk.nodeName==="P"&&/^\/[^\s/]{0,12}$/.test(txt)){ if(menuFor!==blk) menuSel=0; openMenu(blk,txt.slice(1)); }
     else if(!menu.hidden) closeMenu();
     refresh();
-  });
+  }
   document.addEventListener("mousedown",function(e){
     var t=e.target;
     if(!menu.hidden&&!menu.contains(t)) closeMenu();
@@ -852,7 +866,7 @@ export const PAGE_BLOCKS_SCRIPT = String.raw`
   // ---------- ブロックの設定（右の欄のいちばん上。選んだレイアウトのブロックの値をその場で変える） ----------
   var setCard=null, setFor=null;
   (function(){ var aside0=form.querySelector(".split > aside"); if(aside0){ setCard=el("section","card pe-blockset"); setCard.setAttribute("aria-live","polite"); aside0.insertBefore(setCard,aside0.firstChild); } })();
-  function setAttr(b,key,v){ b.setAttribute("data-"+key,v); cls(b); if(key==="ratio") syncCols(b); if(key==="alt"){ var im=b.querySelector(".banto-media__fig img"); if(im) im.alt=v; } mark(); refresh(); }
+  function setAttr(b,key,v){ b.setAttribute("data-"+key,v); if(kindOf(b)==="audience") audienceLabel(b); cls(b); if(key==="ratio") syncCols(b); if(key==="alt"){ var im=b.querySelector(".banto-media__fig img"); if(im) im.alt=v; } mark(); refresh(); }
   function openSettings(){ var a0=form.querySelector(".split > aside"); if(a0&&a0.hidden&&typeof setSet==="function") setSet(true); drawSettings(true); if(setCard) setCard.scrollIntoView({block:"nearest"}); }
   function drawSettings(force){
     if(!setCard) return;
