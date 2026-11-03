@@ -4,7 +4,14 @@ import { applyMigrations, migrationHosts, MigrationError, MIGRATION_STEP_BUDGET_
 import { applyMigrationsViaApi, ManagementApiError, normalizeAccessToken, projectRefFromUrl } from "../../db/migrate-api";
 import { pendingMigrationFiles } from "../../db/migrations";
 import { forgetAppliedMigrations } from "../../db/migration-state";
-import { t } from "../../i18n";
+import { t, tf } from "../../i18n";
+
+/** マイグレーションの名前の並び。多いときは件数と最初・最後だけにする（全部並べると画面が名前で埋まる） */
+export function migrationList(names: readonly string[]): string {
+  if (names.length <= 3) return names.join(", ");
+  return tf("migrate.list_range", { n: names.length, first: names[0] ?? "", last: names[names.length - 1] ?? "" });
+}
+
 
 /**
  * 当てる版が多いと（初回は全部）、1 回のリクエストでは当てきれない（Workers のサブリクエストの上限・ブラウザとの接続の持ち時間）。
@@ -75,7 +82,9 @@ function MigrateFormOnly(props: { action: string; pending: string[]; error?: str
       <p class="muted">{t("migrate.not_stored")}</p>
       <p>
         <button type="submit">
-          {t("migrate.submit")} ({props.pending.join(", ")})
+          {props.pending.length > 3
+            ? tf("migrate.submit_count", { n: props.pending.length })
+            : `${t("migrate.submit")} (${props.pending.join(", ")})`}
         </button>
       </p>
       <progress data-migrate-bar="" max={props.pending.length || 1} value={0} hidden style="width:100%;max-width:40rem"></progress>
