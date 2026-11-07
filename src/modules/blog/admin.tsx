@@ -17,9 +17,9 @@ import { moduleEnabled } from "../registry";
 import { PAGE_LIMITS, PAGE_NAVS, PAGES_TRASH_DAYS, handleFromTitle, type PageNav } from "../../pages";
 import { formatDateTime, zonedInputToIso } from "../../i18n/time";
 import { ContentForm, type EditorKind, contentState, editorCatalog, editorHtml, featuredImageUrl, mountEditorEndpoints, type ContentValues, type RevisionRow, contentAudienceValues } from "../../content/editor";
-import { ARTICLE_ORDERS, BLOG_MODULE, BLOG_ORDER_MIGRATION, articleHandleOk, blogHandleOk, isArticleOrder, parseTags, type ArticleRow, type BlogRow } from "../../blog";
+import { ARTICLE_ORDERS, BLOG_MODULE, BLOG_ORDER_MIGRATION, articleHandleOk, blogHandleOk, blogOrderReady as blogRowOrdered, isArticleOrder, isBlogOrder, parseTags, type ArticleRow, type BlogRow } from "../../blog";
 import { migrated } from "../../db/migration-state";
-import { ARTICLE_FIELD_IMAGE_MIGRATION, articleFieldDefs, articleFieldsReady, fieldsFromForm, formatArticleFieldRows, parseArticleFieldRows, type ArticleFieldDef } from "../../blog/fields";
+import { ARTICLE_FIELD_DATES_MIGRATION, ARTICLE_FIELD_IMAGE_MIGRATION, articleFieldDefs, articleFieldsReady, fieldsFromForm, formatArticleFieldRows, parseArticleFieldRows, type ArticleFieldDef } from "../../blog/fields";
 import { fieldImageUpload } from "../../routes/admin/field-image";
 
 /**
@@ -70,11 +70,11 @@ const opt = (v: string | undefined, max: number) => {
 
 // ---------- ブログ ----------
 
-type BlogValues = Pick<BlogRow, "title" | "handle" | "description" | "seo_title" | "seo_description" | "template_suffix" | "nav" | "sort_order" | "article_order" | "feed">;
+type BlogValues = Pick<BlogRow, "title" | "handle" | "description" | "seo_title" | "seo_description" | "template_suffix" | "nav" | "sort_order" | "article_order" | "feed" | "article_from_today" | "article_until">;
 
 /** 0116（並び順・フィード）が当たっているか。ブログの行があれば列があるかで分かる（問い合わせない） */
 async function blogOrderReady(c: AdminContext, blog?: BlogRow | null): Promise<boolean> {
-  if (blog) return isArticleOrder(blog.article_order);
+  if (blog) return blogRowOrdered(blog);
   return migrated({ db: owner(c).db, cache: c.get("adapters").cache }, BLOG_ORDER_MIGRATION).catch(() => false);
 }
 
@@ -93,7 +93,9 @@ function blogValues(f: Record<string, string>, ordered = false): { values: BlogV
     nav: (PAGE_NAVS as readonly string[]).includes(f.nav ?? "") ? (f.nav as PageNav) : "none",
     sort_order: Number.isInteger(sort) ? Math.max(-1000, Math.min(1000, sort)) : 0,
     // 欄を出したフォーム（order_fields）からだけ読む（無いフォームで「フィード無し」にしない）
-    ...(ordered && f.order_fields === "1" ? { article_order: isArticleOrder(f.article_order) ? f.article_order : "new", feed: f.feed === "1" } : {}),
+    ...(ordered && f.order_fields === "1" ? { article_order: isBlogOrder(f.article_order) ? f.article_order : "new", feed: f.feed === "1" } : {}),
+    // 0124: 日付の項目の順のとき今日以降だけ（欄を出したフォームからだけ読む）
+    ...(ordered && f.from_today_present === "1" ? { article_from_today: f.article_from_today === "1", article_until: /^[a-z][a-z0-9_]{0,39}$/.test(f.article_until ?? "") ? f.article_until! : null } : {}),
   };
   if (!title || title.length > 200) return { values, error: "pages.error_title" };
   if (!blogHandleOk(values.handle)) return { values, error: "blog.error_handle" };
@@ -108,7 +110,7 @@ function blogDbError(e: DbError): MessageKey {
   return "error.generic";
 }
 
-function BlogFields(props: { v: BlogValues; ordered?: boolean }) {
+function BlogFields(props: { v: BlogValues; ordered?: boolean; dateFields?: { key: string; label: string }[] }) {
   const v = props.v;
   return (
     <>
@@ -141,8 +143,32 @@ function BlogFields(props: { v: BlogValues; ordered?: boolean }) {
                 {t(`blog.order_${o}` as MessageKey)}
               </option>
             ))}
+            {(typeof v.article_from_today === "boolean" ? (props.dateFields ?? []) : []).map((f) => (
+              <option value={`field:${f.key}`} selected={v.article_order === `field:${f.key}`}>
+                {tf("blog.order_field", { label: f.label })}
+              </option>
+            ))}
           </select>
           <p class="muted">{t("blog.order_help")}</p>
+          {typeof v.article_from_today === "boolean" ? (
+            <>
+              <input type="hidden" name="from_today_present" value="1" />
+              <label>
+                <input type="checkbox" name="article_from_today" value="1" checked={v.article_from_today} /> {t("blog.order_from_today")}
+              </label>
+              <p class="muted">{t("blog.order_from_today_help")}</p>
+              <label for="article_until">{t("blog.order_until")}</label>
+              <select id="article_until" name="article_until">
+                <option value="">{t("blog.order_until_none")}</option>
+                {(props.dateFields ?? []).map((f) => (
+                  <option value={f.key} selected={v.article_until === f.key}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+              <p class="muted">{t("blog.order_until_help")}</p>
+            </>
+          ) : null}
           <label>
             <input type="checkbox" name="feed" value="1" checked={v.feed !== false} /> {t("blog.feed_on")}
           </label>
@@ -450,7 +476,7 @@ async function blogSettings(c: AdminContext, shop: ShopRow, blog: BlogRow, opts:
       {c.req.query("flash") === "saved" ? <p class="notice">{t("shop.saved")}</p> : null}
       {opts.error ? <p class="error">{t(opts.error)}</p> : null}
       <form method="post" action={`${base(shop.id)}/${blog.id}/settings`} class="card">
-        <BlogFields v={opts.values ?? blog} ordered={isArticleOrder(blog.article_order)} />
+        <BlogFields v={{ ...(opts.values ?? blog), ...(typeof blog.article_from_today === "boolean" && typeof (opts.values ?? blog).article_from_today !== "boolean" ? { article_from_today: blog.article_from_today, article_until: blog.article_until ?? null } : {}) }} ordered={blogRowOrdered(blog)} dateFields={articleFieldDefs(blog).filter((f) => f.type === "date" || f.type === "datetime")} />
         <p>
           <button type="submit">{t("pages.save")}</button>
         </p>
@@ -494,7 +520,7 @@ blogAdmin.post("/:blogId/settings", requireOwner, async (c: AdminContext) => {
   const shop = await scope(c);
   const blog = shop ? await loadBlog(c, shop) : null;
   if (!shop || !blog) return c.notFound();
-  const { values, error } = blogValues(await formFields(c), isArticleOrder(blog.article_order));
+  const { values, error } = blogValues(await formFields(c), blogRowOrdered(blog));
   if (error) return blogSettings(c, shop, blog, { values, error, status: 400 });
   try {
     await owner(c).db.from("blogs").update(values, { id: blog.id, shop_id: shop.id });
@@ -520,12 +546,15 @@ blogAdmin.post("/:blogId/fields", requireOwner, async (c: AdminContext) => {
   if (!articleFieldsReady(blog)) return c.redirect(`${base(shop.id)}/${blog.id}/settings`);
   const text = (await formFields(c))["rows"] ?? "";
   const blogs = await owner(c).db.from<{ id: string; handle: string }>("blogs").select("id,handle", { eq: { shop_id: shop.id }, limit: 100 });
-  const image = await migrated({ db: owner(c).db, cache: c.get("adapters").cache }, ARTICLE_FIELD_IMAGE_MIGRATION).catch(() => false);
-  const { defs, error } = parseArticleFieldRows(text, blogs, { image });
+  const deps = { db: owner(c).db, cache: c.get("adapters").cache };
+  const [image, dates] = await Promise.all([migrated(deps, ARTICLE_FIELD_IMAGE_MIGRATION).catch(() => false), migrated(deps, ARTICLE_FIELD_DATES_MIGRATION).catch(() => false)]);
+  const { defs, error } = parseArticleFieldRows(text, blogs, { image, dates });
   if (error !== null) return blogSettings(c, shop, blog, { fieldsText: text, fieldsError: error.slice(0, 100), status: 400 });
   try {
     await owner(c).db.from("blogs").update({ article_fields: defs }, { id: blog.id, shop_id: shop.id });
   } catch (e) {
+    // 並び順・いつまで出すかに使っている日付の項目は消せない（0125）
+    if (e instanceof DbError && /invalid_article_(order|until)/.test(e.message)) return blogSettings(c, shop, blog, { fieldsText: text, fieldsError: t("blog.fields_used_by_order"), status: 400 });
     if (e instanceof DbError) return blogSettings(c, shop, blog, { fieldsText: text, fieldsError: e.message.replace(/^.*article_fields_invalid:?/, "") || "—", status: 400 });
     throw e;
   }

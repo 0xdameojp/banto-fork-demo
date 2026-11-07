@@ -140,6 +140,7 @@ export function parseButtonLine(line: string): { text: string; url: string; styl
 
 // ---------- 記事を並べる（同梱モジュール blog の記事。1 行のブロック） ----------
 //   ::: articles blog=news tag=お知らせ limit=3 layout=grid style=card sort=manual
+//   ::: articles blog=events sort=field:starts from=today until=field:ends   （日付の項目の早い順・今日以降だけ（0124）・終了日で決める（0125））
 export type ArticlesLayout = "grid" | "list";
 /** 記事の並び順（src/blog の ArticleOrder と同じ。0116） */
 export type ArticlesSort = "new" | "title" | "manual";
@@ -157,6 +158,12 @@ export interface ArticlesBlock {
   limit: number;
   layout: ArticlesLayout;
   style: string | null;
+  /** 日付の項目の順（sort=field:<key>、0124。早い順）。あれば sort より先 */
+  fieldSort?: string | null;
+  /** from=today: 日付の項目（fieldSort）が今日以降のものだけ（0124） */
+  from?: "today" | null;
+  /** until=field:<key>: 「今日以降」を決める項目（終了日、0125）。値の無い記事は fieldSort で決める */
+  until?: string | null;
 }
 /** 1 ページに置ける記事のブロック（これより後のものは描かない） */
 export const ARTICLE_BLOCKS_MAX = 2;
@@ -177,13 +184,22 @@ export function parseArticlesLine(line: string): ArticlesBlock | null {
   if (!Number.isInteger(limit) || limit < 1 || limit > ARTICLE_BLOCK_LIMIT_MAX) return null;
   const layout = a.get("layout") ?? "grid";
   if (layout !== "grid" && layout !== "list") return null;
-  const sortRaw = a.get("sort");
+  const sortAttr = a.get("sort");
+  // 日付の項目の順（0124）: sort=field:<key>。from=today はそのときだけ
+  const fieldSort = sortAttr !== undefined && /^field:[a-z][a-z0-9_]{0,39}$/.test(sortAttr) ? sortAttr.slice(6) : null;
+  const sortRaw = fieldSort ? undefined : sortAttr;
   if (sortRaw !== undefined && sortRaw !== "new" && sortRaw !== "title" && sortRaw !== "manual") return null;
+  const fromRaw = a.get("from");
+  if (fromRaw !== undefined && fromRaw !== "today") return null;
+  const from = fieldSort && fromRaw === "today" ? ("today" as const) : null;
+  const untilRaw = a.get("until");
+  if (untilRaw !== undefined && !/^field:[a-z][a-z0-9_]{0,39}$/.test(untilRaw)) return null;
+  const until = from && untilRaw ? untilRaw.slice(6) : null;
   // 項目の絞り込み（1 つ）: field:<key>=<値>。値は 100 字まで、空白を含むときは引用符
   const fm = /(?:^|\s)field:([a-z][a-z0-9_]{0,39})=(?:"([^"\n]{1,100})"|([^\s"]{1,100}))/.exec(m[1] ?? "");
   const field = fm ? { key: fm[1]!, value: (fm[2] ?? fm[3] ?? "").trim() } : null;
   if (field && !field.value) return null;
-  return { blog, tag, sort: sortRaw ?? null, ...(field ? { field } : {}), limit, layout, style: styleOf(a.get("style")) };
+  return { blog, tag, sort: sortRaw ?? null, ...(field ? { field } : {}), ...(fieldSort ? { fieldSort } : {}), ...(from ? { from } : {}), ...(until ? { until } : {}), limit, layout, style: styleOf(a.get("style")) };
 }
 
 export function articlesLine(b: ArticlesBlock): string {
@@ -191,7 +207,10 @@ export function articlesLine(b: ArticlesBlock): string {
   if (b.tag) parts.push(/^[^\s"]+$/.test(b.tag) ? `tag=${b.tag}` : `tag="${b.tag.replace(/"/g, "")}"`);
   if (b.field) parts.push(/^[^\s"]+$/.test(b.field.value) ? `field:${b.field.key}=${b.field.value}` : `field:${b.field.key}="${b.field.value.replace(/"/g, "")}"`);
   parts.push(`limit=${b.limit}`, `layout=${b.layout}`);
-  if (b.sort) parts.push(`sort=${b.sort}`);
+  if (b.fieldSort) parts.push(`sort=field:${b.fieldSort}`);
+  else if (b.sort) parts.push(`sort=${b.sort}`);
+  if (b.fieldSort && b.from) parts.push(`from=${b.from}`);
+  if (b.fieldSort && b.from && b.until) parts.push(`until=field:${b.until}`);
   if (b.style) parts.push(`style=${b.style}`);
   return parts.join(" ");
 }
