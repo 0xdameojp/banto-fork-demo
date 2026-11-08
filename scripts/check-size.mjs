@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Worker 本体の圧縮後サイズが予算内か検査する（docs/ARCHITECTURE.md「速度の予算」、CLAUDE.md §7）。
+// 測るのは既定のビルド（wrangler.jsonc の minify: true。BANTO_MINIFY=off で縮めずに送るデプロイは Cloudflare の上限だけを守る、docs/setup.md §11）。
+// 管理画面に toString() で埋め込むブラウザのコードがビルドの後も動くかは npm run check:client（scripts/check-client-scripts.mjs）。
 // 先に npm run build:workers を実行しておくこと。上限を上げるときは理由を docs/knowledge/02-decisions.md に書く。
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { gzipSync } from "node:zlib";
@@ -28,3 +30,4 @@ if (gz > BUDGET_BYTES) {
   process.exit(1);
 }
 console.log(line);
+
