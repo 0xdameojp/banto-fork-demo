@@ -2140,8 +2140,10 @@ export class FakeSupabase {
     // 0059: 管理画面の部分一致の検索（本物は権限を 1 回確かめて RLS の外でインデックスを使う）
     if (fn === "admin_search_ids") {
       const shopId = String(args["p_shop_id"]);
-      if (!uid || !this.ownedShopIds(uid).has(shopId)) return json({ code: "42501", message: "forbidden" }, 403);
       const kind = String(args["p_kind"]) as "products" | "orders" | "customers";
+      // 本物と同じく、その種類の項目を持つメンバーも（0059）
+      const kindPerm = ({ products: "catalog", orders: "orders", customers: "customers" } as Record<string, string>)[kind] ?? "";
+      if (!uid || !(this.ownedShopIds(uid).has(shopId) || this.memberPerms(uid, shopId).includes(kindPerm))) return json({ code: "42501", message: "forbidden" }, 403);
       const raw = String(args["p_q"] ?? "").trim();
       const q = raw.toLowerCase();
       const f = (args["p_filters"] ?? {}) as Record<string, string>;
@@ -2268,6 +2270,23 @@ export class FakeSupabase {
       return json(before - this.memberPasskeys.length);
     }
     // 0048: 運営者が会員の独自項目を直す（定義に無い鍵は断る。渡した鍵だけ重ね、null で消す）
+    if (fn === "views_add" || fn === "views_remove") {
+      // 0135: その画面の項目の人だけ。並びは今の値から 1 つ足す / 名前で消す（形と大きさの検査の本物は test/db/admin-views.test.ts）
+      const shopId = String(args["p_shop_id"]);
+      const screen = String(args["p_screen"]);
+      const perm = ({ orders: "orders", customers: "customers", products: "catalog", inquiries: "support" } as Record<string, string>)[screen];
+      if (!perm) return json({ code: "22023", message: "invalid_screen" }, 400);
+      if (!uid || !(this.ownedShopIds(uid).has(shopId) || this.memberPerms(uid, shopId).includes(perm))) return json({ code: "42501", message: "shop_not_found" }, 403);
+      const shop = this.tables.shops.find((x) => x["id"] === shopId)!;
+      const settings = (shop["settings"] ?? {}) as Row;
+      const name = String(args["p_name"] ?? "").trim();
+      const cur = ((Array.isArray(settings[`views_${screen}`]) ? settings[`views_${screen}`] : []) as { name: string }[]).filter((v) => v.name !== name);
+      if (fn === "views_add" && (!name || name.length > 40)) return json({ code: "22023", message: "invalid_view_name" }, 400);
+      const out = fn === "views_add" ? [...cur, { name, query: args["p_query"] }] : cur;
+      if (out.length > 20) return json({ code: "22023", message: "views_full" }, 400);
+      shop["settings"] = { ...settings, [`views_${screen}`]: out };
+      return json(out);
+    }
     if (fn === "customer_set_note") {
       // 0133: 項目 customers の人だけ。2,000 字まで、空は消す（本物は test/db/customer-stats-note.test.ts）
       const shopId = String(args["p_shop_id"]);
