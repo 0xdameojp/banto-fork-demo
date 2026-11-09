@@ -2,7 +2,7 @@ import { createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import type { RawConnection, SocketAdapter } from "../src/adapters/types";
 import { nodeSockets } from "../src/adapters/node/socket";
-import { createMailer, MailError, mailTransportMissing, mailTransportName, sendMail } from "../src/mail/send";
+import { createMailer, MailError, mailFailureLog, mailTransportMissing, mailTransportName, sendMail } from "../src/mail/send";
 import { buildMimeMessage, encodeHeaderText, parseAddress } from "../src/mail/message";
 import { dotStuff } from "../src/mail/smtp-client";
 import { SENDGRID_API_URL } from "../src/mail/transports/sendgrid";
@@ -279,6 +279,29 @@ describe("SMTP の送り手", () => {
     expect(r).toBeInstanceOf(MailError);
     expect((r as MailError).status).toBe(550);
     expect((r as MailError).message).toMatch(/MAIL: 550 5\.1\.0 sender rejected/);
+  });
+
+  it("送信元の形が誤っていれば接続せずに MailError（例外のまま 500 にしない）", async () => {
+    let connected = false;
+    const sockets: SocketAdapter = {
+      async connect() {
+        connected = true;
+        throw new Error("unexpected");
+      },
+    };
+    const mailer = createMailer({ ...memoryAdapters({ MAIL_TRANSPORT: "smtp", SMTP_HOST: "h" }), socket: sockets }, fetch)!;
+    for (const from of ["マイショップ order@example.com", "マイショップ ＜order@example.com＞", "order@example"]) {
+      const r = await sendMail(mailer, { ...MAIL, from }).catch((x: unknown) => x);
+      expect(r).toBeInstanceOf(MailError);
+      expect((r as MailError).message).toMatch(/invalid mail address/);
+    }
+    expect(connected).toBe(false);
+  });
+
+  it("送れなかったときのログはアドレスの @ の前を伏せる（会員でない人のアドレスを残さない）", () => {
+    const line = mailFailureLog("member login", { name: "smtp" }, new MailError(550, "SMTP RCPT: 550 5.1.1 <taro.yamada@example.com>: Recipient address rejected"));
+    expect(line).toBe("[banto] member login: mail failed (smtp 550): SMTP RCPT: 550 5.1.1 <***@example.com>: Recipient address rejected");
+    expect(mailFailureLog("invite", null, new MailError(422, '{"message":"Invalid `to` field: a+b@x.jp, c@y.jp"}'))).not.toMatch(/a\+b@|c@y/);
   });
 
   it("Node の生の TCP（node:net）で本物のソケットを通して送れる（平文、同じホスト）", async () => {
