@@ -2287,6 +2287,17 @@ export class FakeSupabase {
       shop["settings"] = { ...settings, [`views_${screen}`]: out };
       return json(out);
     }
+    if (fn === "product_images_order") {
+      // 0138: 項目 catalog の人だけ。その商品の画像ちょうど全部を受け取り、0 から振り直す（本物は test/db/product-images-order.test.ts）
+      const shopId = String(args["p_shop_id"]);
+      if (!uid || !(this.ownedShopIds(uid).has(shopId) || this.memberPerms(uid, shopId).includes("catalog"))) return json({ code: "42501", message: "shop_not_found" }, 403);
+      const mine = this.tables.product_images.filter((i) => i["shop_id"] === shopId && i["product_id"] === args["p_product_id"]);
+      const ids = (Array.isArray(args["p_ids"]) ? args["p_ids"] : []) as string[];
+      if (new Set(ids).size !== ids.length || ids.length !== mine.length || ids.some((id) => !mine.some((i) => i["id"] === id))) return json({ code: "22023", message: "invalid_images" }, 400);
+      let n = 0;
+      ids.forEach((id, i) => { const row = mine.find((x) => x["id"] === id)!; if (row["sort_order"] !== i) { row["sort_order"] = i; n++; } });
+      return json(n);
+    }
     if (fn === "catalog_bulk_update") {
       // 0137: 項目 catalog の人だけ。開いたときの値と比べ、誤りが 1 つでもあれば何も変えない（形の決まりの本物は test/db/catalog-bulk.test.ts）
       const shopId = String(args["p_shop_id"]);
@@ -2307,7 +2318,8 @@ export class FakeSupabase {
         if (!row) { errors.push({ ...base, error: "not_found" }); continue; }
         const col = String(x["col"]);
         const to = x["to"] == null ? null : String(x["to"]).trim() || null;
-        if ((text(row, col)?.trim() || null) !== (x["from"] ?? null)) { errors.push({ ...base, error: "changed", current: text(row, col) }); continue; }
+        const norm = (v: unknown) => (typeof v === "string" ? v.trim() || null : null);
+        if (norm(text(row, col)) !== norm(x["from"])) { errors.push({ ...base, error: "changed", current: text(row, col) }); continue; }
         const ok = col === "name" ? to !== null && to.length <= 200 : col === "published" ? to === "true" || to === "false" : col === "price_jpy" ? to !== null && /^\d{1,9}$/.test(to) : col === "compare_at_price_jpy" ? to === null || /^\d{1,9}$/.test(to) : col === "gtin" ? to === null || /^(\d{8}|\d{12,14})$/.test(to) : col === "category_id" ? to === null || this.tables.categories.some((k) => k["id"] === to && k["shop_id"] === shopId) : true;
         if (!ok) { errors.push({ ...base, error: "invalid" }); continue; }
         rows.set(row, { ...(rows.get(row) ?? {}), [col]: to });
