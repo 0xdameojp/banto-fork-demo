@@ -144,3 +144,27 @@ describe("本文の最初の画像をすぐ読む（LCP）", () => {
   });
 });
 
+describe("後から MEDIA_BASE_URL（R2 のドメイン）を付けたとき", () => {
+  it("前の入口の URL で書いた本文の画像・アイキャッチ・OG の画像も、置き場のドメインから配る（Worker を通さない）", async () => {
+    const { sb, shop } = setup();
+    // 置いた時の入口（workers.dev）の絶対 URL の本文と、ホストを外して保存したアイキャッチ
+    sb.addPage(shop.id, { id: crypto.randomUUID(), handle: "old", title: "前に作ったページ", body: "![店](https://banto.example.workers.dev/media/pages/s/hero.webp)\n\n![2](/media/pages/s/two.webp)", image_url: "/media/pages/s/eye.webp" });
+    const app = appWith(sb, { MEDIA_BASE_URL: "https://media.example.jp" }, new MemoryStorage("https://media.example.jp"), new FakeStripe());
+    const html = await (await new Browser(app, BASE).get("/my-shop/pages/old")).text();
+    expect(html).toContain('src="https://media.example.jp/pages/s/hero.webp"');
+    expect(html).toContain('src="https://media.example.jp/pages/s/two.webp"');
+    expect(html).toContain('<img class="page-image" src="https://media.example.jp/pages/s/eye.webp"');
+    expect(html).toContain('<meta property="og:image" content="https://media.example.jp/pages/s/eye.webp"');
+    expect(html).not.toContain("/media/pages/s/");
+  });
+
+  it("置き場のドメインを別のドメインに付け替える前に保存したアイキャッチは、置き場の外として出さない（空の src の <img> を出さない）", async () => {
+    const { sb, shop } = setup();
+    sb.addPage(shop.id, { id: crypto.randomUUID(), handle: "moved", title: "付け替え前のページ", body: "本文", image_url: "https://old-media.example.jp/pages/s/eye.webp" });
+    const app = appWith(sb, { MEDIA_BASE_URL: "https://media.example.jp" }, new MemoryStorage("https://media.example.jp"), new FakeStripe());
+    const html = await (await new Browser(app, BASE).get("/my-shop/pages/moved")).text();
+    expect(html).not.toContain('class="page-image"');
+    expect(html).not.toContain('src=""');
+  });
+});
+
